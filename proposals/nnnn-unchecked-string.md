@@ -56,7 +56,10 @@ code when taking either of these approaches.
 type that supports
 
 * Arbitrary `FixedWidthInteger` code units.
-* A similar set of APIs to `String`.
+* A similar set of APIs to `String`, including full mutation support
+  (`UncheckedString` conforms to `RangeReplaceableCollection`, so it can be
+  built up incrementally with `append`, `insert`, `replaceSubrange`, and so
+  on, not just constructed once and read).
 * Efficient COW storage, with the small string optimization.
 * Compiler-supported string literal syntax, including a new hexadecimal
   escape sequence to allow the use of raw code units.
@@ -103,6 +106,23 @@ The API for these types is similar to the API on `String`, `SubString` and
   it will be.
 * `UncheckedString` supports an extra character escape, `\x{hh}`, which
   allows the direct specification of individual code units.
+* `UncheckedString` and `UncheckedSubString` both conform to
+  `RangeReplaceableCollection`, so, unlike a bare `Array<UInt8>` or `Data`,
+  they support in-place mutation (`append`, `insert`, `remove(at:)`,
+  `replaceSubrange`, `reserveCapacity`, `+`/`+=`, and so on) as well as
+  construction from a fixed `Collection`.
+* Ordering (`<`) is defined element-wise on the raw `Element` values, using
+  whatever ordering `Element` itself provides -- there is no attempt to
+  impose a culturally meaningful or even a byte-oriented order.  This means,
+  for instance, that `UncheckedString<Int8>` and `UncheckedString<UInt8>`
+  holding the same underlying bytes can compare differently, since `Int8`
+  and `UInt8` disagree about the ordering of byte values 0x80--0xFF.
+* Alongside `==`, `UncheckedString` and `UncheckedSubString` provide
+  `isTriviallyIdentical(to:)`, mirroring `String`'s existing method of the
+  same name.  It is a cheap, O(1) check for whether two values share (or are
+  known by construction to be equivalent to sharing) the same underlying
+  storage, as distinct from `==`'s (possibly O(*n*)) check for equal
+  content.
 * There is presently no regular expression support for `UncheckedString`.
 
 There are also counterparts of `CustomStringConvertible`,
@@ -171,6 +191,15 @@ let iso8859Name = "Ren\x{e9} Descartes" // UncheckedString<UInt8>
 
 // This is a compile-time error:
 let invalidName: String = "Ren\x{e9} Descartes"
+```
+
+The `\x{hh}` escape can take any number of hexadecimal digits, subject to
+the value fitting into the `UncheckedString`'s `Element` type, for example:
+
+```swift
+let smileyUTF8 = "\x{f0}\x{9f}\x{98}\x{90}"
+let smileyUTF16: UncheckedString<UInt16> = "\x{d83d}\x{de00}"
+let smileyUCS4: UncheckedString<UInt32> = "\x{1f600}"
 ```
 
 The compiler further guarantees that `UncheckedString` literal data is
@@ -300,10 +329,18 @@ public protocol UncheckedStringProtocol
 }
 ```
 
+Note the previous comment about `Comparable`; because it is defined
+lexicographically over raw `Element` values and because there is no attempt
+at byte-wise or locale-aware ordering, ordering is sensitive to `Element`'s
+signedness: i.e. `UncheckedString<Int8>` and
+`UncheckedString<UInt8>` values holding identical underlying bytes can
+compare differently to one another for any byte in `0x80...0xFF`, since
+`Int8` and `UInt8` disagree about the relative order of those values.
+
 ### `UncheckedString` API
 
-`UncheckedString` has a single property, `count`, and can be constructed
-empty, or from a `Collection`.
+`UncheckedString` can be constructed empty, or from a `Collection`, and
+exposes its length via `count`/`isEmpty`:
 
 ```swift
 /// A string value that is a collection of characters in an unspecified
@@ -318,6 +355,9 @@ public struct UncheckedString<E: FixedWidthInteger>: UncheckedStringProtocol {
   @inlinable
   public var count: Int { get }
 
+  @inlinable
+  public var isEmpty: Bool { get }
+
   /// Constructs an empty string
   @inlinable
   public init()
@@ -331,6 +371,57 @@ public struct UncheckedString<E: FixedWidthInteger>: UncheckedStringProtocol {
   public init<C: Collection>(_ c: C) where C.Element == Element
 }
 ```
+
+Beyond this, `UncheckedString` and `UncheckedSubString` conform to
+`BidirectionalCollection`, `RangeReplaceableCollection`, `Equatable`,
+`Hashable`, and `Comparable` (all via `UncheckedStringProtocol`), and provide
+`hasPrefix`/`hasSuffix` overloads that accept any `UncheckedStringProtocol`
+value of the same `Element` (so an `UncheckedString<UInt8>` and an
+`UncheckedSubString<UInt8>` can be compared against one another, not just
+against another value of the exact same type).
+
+Because they conform to `RangeReplaceableCollection`, values can be mutated
+in place, rather than only constructed once from a fixed `Collection`:
+
+```swift
+var path: UncheckedString<UInt8> = "/usr/local"
+path.append(contentsOf: "/bin")
+path += "/swift"
+// path is now "/usr/local/bin/swift"
+```
+
+`UncheckedString`'s `CustomDebugStringConvertible` conformance renders
+non-printable and non-ASCII elements using the same `\x{hh}` notation used
+by its literals, and escapes literal backslash and double-quote characters,
+so that `String(reflecting:)`/`debugPrint` produce output that could, in
+most cases, be pasted back in as a literal.
+
+### Identity comparison
+
+Alongside `==`, which checks for equal *content*, `UncheckedString` and
+`UncheckedSubString` provide `isTriviallyIdentical(to:)`, an O(1) check for
+whether two values are backed by the same storage (or are otherwise known,
+cheaply, to be equivalent to sharing storage). This mirrors `String`'s
+existing `isTriviallyIdentical(to:)`:
+
+```swift
+@available(SwiftStdlib 9999, *)
+extension UncheckedString {
+  /// Returns whether this string and `other` share the same underlying
+  /// storage, making them cheap (O(1)) to compare, as opposed to `==`,
+  /// which compares content and may take O(*n*) time.
+  ///
+  /// `isTriviallyIdentical(to:)` is not required to return `true` for two
+  /// values holding equal content -- for instance, two small strings with
+  /// the same characters are not guaranteed to be considered identical,
+  /// even though there is no separate heap allocation involved.
+  @inlinable
+  public func isTriviallyIdentical(to other: Self) -> Bool
+}
+```
+
+This is useful, for example, to cheaply short-circuit a comparison, or to
+detect whether a copy-on-write mutation actually triggered a copy.
 
 It also has support for C strings:
 
@@ -368,6 +459,22 @@ extension UncheckedString where Element == UInt8 {
   public init(cString nullTerminatedCharacters: UnsafePointer<CChar>)
 }
 ```
+
+`UncheckedString`'s own `count` and iteration have no opinion about
+zero-valued elements; unlike a C string, a zero-valued `Element` occurring
+*within* an `UncheckedString`'s logical content is ordinary data like any
+other, and is included in `count` and preserved by mutation.  The
+NUL-termination handled by `withCString`, `init(cString:)`, and pointer
+conversions to C APIs is a *separate*, implicit terminator appended after
+the string's `count` elements, not a delimiter within them.  Consequently,
+if a string's logical content happens to contain an embedded zero-valued
+element (for instance, byte 0x00 in an `UncheckedString<UInt8>` built from
+already-decoded data), passing it to `withCString` or a `UnsafePointer<Element>`
+argument will still produce a well-formed, NUL-terminated buffer, but any C
+API reading that buffer will see it as ending at the *first* zero-valued
+element, silently ignoring anything in the string past that point, even
+though `count` reports the full, untruncated length. This is the same
+hazard `String`/`Substring` already have when converted to C strings.
 
 An additional feature of `UncheckedString` is support for _immortal_ strings,
 which are strings whose memory is allocated elsewhere somehow (for instance
@@ -511,6 +618,74 @@ guard let swiftName = ansiName.decode(as: Windows1252.self) else {
 assert(swiftName == "René Descartes")
 ```
 
+### `Codable` support
+
+`UncheckedString` conforms to `Encodable`/`Decodable` whenever its `Element`
+does, encoding itself as an unkeyed container of its own raw `Element`
+values -- the same representation `Array<Element>` would use, and (for
+`UInt8`) the same representation `Data` uses. This is unrelated to the
+`encode(as:)`/`decode(as:)` APIs above: those convert to/from `String`
+under an explicit, named text `Unicode.Encoding`, whereas `Codable`
+conformance serializes the raw code units with no text encoding involved at
+all, for interop with `Encoder`/`Decoder`-based formats such as JSON or
+property lists.
+
+```swift
+@available(SwiftStdlib 9999, *)
+extension UncheckedString: Encodable where Element: Encodable {
+  public func encode(to encoder: any Encoder) throws {
+    var container = encoder.unkeyedContainer()
+    try withCharacterData { data in
+      var i = 0
+      while i < data.count {
+        try container.encode(data[i])
+        i += 1
+      }
+    }
+  }
+}
+
+@available(SwiftStdlib 9999, *)
+extension UncheckedString: Decodable where Element: Decodable {
+  public init(from decoder: any Decoder) throws {
+    var container = try decoder.unkeyedContainer()
+    var elements = [Element]()
+    if let count = container.count {
+      elements.reserveCapacity(count)
+    }
+    while !container.isAtEnd {
+      elements.append(try container.decode(Element.self))
+    }
+    self.init(taking: elements)
+  }
+}
+```
+
+`UncheckedString` deliberately does *not* attempt to encode itself as
+`String` text (whether by guessing/forcing a Unicode encoding, or via a
+`debugDescription`-style `\x{hh}`-escaped string), since doing so would
+reintroduce the encoding-guessing hazard the type exists to avoid, and
+would make the wire representation's *shape* depend on whether a given
+instance's bytes happen to be printable text.
+
+`UncheckedSubString`, like `Substring`, does not conform to `Codable`.
+Convert to `UncheckedString` first to encode one -- this already works
+today with no new API, since `UncheckedString` already has
+`init<C: Collection>(_:) where C.Element == Element` and
+`UncheckedSubString` already conforms to `Collection` with a matching
+`Element`:
+
+```swift
+try container.encode(UncheckedString(mySubstring))
+```
+
+Note that this conformance is only available outside of Embedded Swift.
+Embedded Swift does not support the `Codable` infrastructure at all (it
+relies on existentials and runtime type metadata that Embedded Swift
+excludes), so `Encodable`/`Decodable`/`Encoder`/`Decoder` themselves are
+not present there, and `UncheckedString`'s conditional conformance to them
+is unavailable for the same reason.
+
 ## Conversion to C string types
 
 `UncheckedString` supports conversions to C string pointers in a similar
@@ -578,9 +753,7 @@ don't want to throw away the backing store at that point.
 
 Performance of `UncheckedString<UInt8>` is generally better than that of
 `String`, since, of course, `UncheckedString` does not need to do any
-Unicode processing.  In some cases (`count`, for instance), it is very
-significantly faster; in others (`hasPrefix`, `hasSuffix`), it is on par,
-but in most cases it's 2 to 5 times faster than `String`.
+Unicode processing.
 
 That is not to say that people should use `UncheckedString` instead of
 `String`; for most programs, `String` will remain the right choice, as it
@@ -657,6 +830,87 @@ attacker is sending malformed data to your program).
 Additionally, conversions can be expensive, and quite often you would need
 to convert back the other way again when serializing data.
 
+### Element being constrained to some type besides FixedWidthInteger
+
+On some platforms, or with some compiler flags on some platforms, `CChar`
+might be signed.  Thus requiring conformance to `UnsignedInteger` is too
+strict.  `FixedWidthInteger` seems a reasonable requirement given that the
+expected use case here is that `Element` will be `UInt8`, `CChar`, `UInt16`,
+`CWideChar` (on Windows only — `CWideChar` on POSIX platforms is unfortunately
+defined as `Unicode.Scalar`, which is not a `FixedWidthInteger` and which is
+also, arguably, incorrect) or possibly `UInt32`.
+
+### Other `Codable` encodings for `UncheckedString`
+
+We considered several alternatives to the array-of-`Element` encoding
+described in "`Codable` support" above:
+
+* **Best-effort decoding to `String`, encoded as a single-value string
+  container.** Reintroduces exactly the encoding-guessing hazard
+  `UncheckedString` exists to avoid, and produces a wire *shape* that
+  depends on the byte content (a JSON string for input that happens to be
+  valid text, something else otherwise) rather than being fixed by the
+  static type -- bad for schema stability.
+
+* **A single string using `\x{hh}`-style escapes**, mirroring
+  `UncheckedString`'s own `debugDescription` format, instead of an array of
+  integers. This is more compact and human-readable for the common case of
+  mostly-printable-ASCII content (paths, headers), and -- unlike the array
+  form -- the result can, in most cases, be pasted back in as a Swift
+  literal. However: it still makes the wire shape "a string," inviting a
+  non-Swift consumer to wrongly assume ordinary UTF-8 text; it requires
+  layering a second, Swift-specific escape grammar *inside* whatever
+  escaping the target format already applies to strings (a literal `\`
+  becomes `\x{5c}`, which a JSON encoder, for instance, would then
+  re-escape again as `\\x{5c}` on the wire); it has no precedent in the
+  standard library or Foundation -- `Data`'s closest analog, base64, is
+  deliberately kept *out* of `Data`'s own `Codable` conformance and pushed
+  into `JSONEncoder`'s `dataEncodingStrategy` instead, precisely so the
+  type's own conformance stays format-neutral; the "compact" argument
+  inverts for genuinely binary payloads (`\x{hh}` costs more per byte than
+  an integer-array entry) and doesn't hold as well as it first appears for
+  `UncheckedString<UInt16>` holding real non-English text, since most such
+  content falls outside the 32-127 "printable" window and gets escaped
+  anyway; and it needs meaningfully more decode-side code (a hand-written
+  variable-length hex-escape parser with its own malformed/truncated/
+  overflow error cases) than the array form's zero format-specific parsing.
+  This reads more like a plausible *encoder-level* policy for someone who
+  specifically wants human-readable JSON, similar to
+  `dataEncodingStrategy`, than something `UncheckedString`'s own default
+  conformance should do.
+
+* **A single string using `%hh`-style escapes**.  Avoids the problem of
+  clashing with the JSON escape syntax, but otherwise suffers from similar
+  problems to the `\x{hh}`-style escapes, and would not be easily paste-able
+  as a Swift literal.
+
+* **A string with an array of replacement characters**.  This is similar to
+  the representation used within the compiler before generation of the final
+  literal bytes.  The idea here is that each `\x{hh}` escape would be
+  represented in the string by a Unicode REPLACEMENT CHARACTER (U+FFFD),
+  as well as separate array containing the character offset and the value
+  to replace it with.  This representation is justified within the compiler
+  because it allows existing code to print string literals in a reasonable
+  manner without worrying about `\x{hh}` escapes, and we also do not know
+  the width of the target encoding until much later on.  As a general-purpose
+  encoding format, however, it seems unnecessarily complex.
+
+* **Delegating to `Array<Element>`'s existing `Codable` conformance**,
+  via an intermediate `Array(self)` (`encoder.singleValueContainer().encode(Array(self))`
+  / `decoder.singleValueContainer().decode([Element].self)`) instead of
+  writing the loop directly. This produces the same wire format, but
+  forces a redundant array copy on encode, and `Array`'s own `Decodable`
+  conformance doesn't pre-size via the decoder's reported element count at
+  all, silently forgoing the presizing optimization `UncheckedString`'s own
+  `init(from:)` performs (mirroring `Data.init(from:)`). Not worth it for
+  either direction.
+
+* **Not conforming to `Codable` at all.** This is the "do nothing"
+  baseline; insufficient given how commonly path-, header-, and
+  environment-variable-like data ends up embedded inside larger `Codable`
+  request/response/config/log models.
+
 ## Acknowledgments
 
-None yet :-)
+Claude helped somewhat with this document and quite a bit with the
+implementation.
