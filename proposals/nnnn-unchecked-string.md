@@ -117,13 +117,13 @@ The API for these types is similar to the API on `String`, `SubString` and
   for instance, that `UncheckedString<Int8>` and `UncheckedString<UInt8>`
   holding the same underlying bytes can compare differently, since `Int8`
   and `UInt8` disagree about the ordering of byte values 0x80--0xFF.
-* Alongside `==`, `UncheckedString` and `UncheckedSubString` provide
-  `isTriviallyIdentical(to:)`, mirroring `String`'s existing method of the
-  same name.  It is a cheap, O(1) check for whether two values share (or are
-  known by construction to be equivalent to sharing) the same underlying
-  storage, as distinct from `==`'s (possibly O(*n*)) check for equal
-  content.
 * There is presently no regular expression support for `UncheckedString`.
+
+Like `String` and `Substring`, `UncheckedString` and `UncheckedSubString`
+both conform to `Sendable`.  Also like `String`, `UncheckedString` and
+`UncheckedSubString` provide an `isTriviallyIdentical(to:)` method, which is
+a cheap, O(1), check for whether two values share the same underlying
+storage, as distinct from `==`s O(*n*) check for equal content.
 
 There are also counterparts of `CustomStringConvertible`,
 `ExpressibleByStringLiteral`, and `ExpressibleByStringInterpolation`
@@ -607,6 +607,9 @@ public extension String {
 This allows the user to write things like
 
 ```swift
+// Assuming the existence of an encoding `Windows1252` `Unicode.Encoding`
+// type (this isn't provided by the standard library presently).
+
 guard let ansiName = "René Descartes".encode(as: Windows1252.self) else {
   fatalError("Cannot encode René Descartes' name for Windows")
 }
